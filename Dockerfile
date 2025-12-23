@@ -1,4 +1,3 @@
-Build backend
 FROM golang:1.25-alpine AS backend-builder
 RUN apk add --no-cache git
 WORKDIR /build/code
@@ -14,7 +13,6 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /build/app .
 
-# 3) Runtime
 FROM alpine:3.22
 
 WORKDIR /app
