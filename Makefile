@@ -1,0 +1,6 @@
+tidy:
+	go mod tidy
+	go fmt ./...
+	go vet ./...
+air:
+	air
