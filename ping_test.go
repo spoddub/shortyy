@@ -1,25 +1,27 @@
-package main
+package main_test
 
 import (
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	db "shorty/internal/db/sqlc"
+	httpapi "shorty/internal/http"
 )
 
 func TestPing(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+	router := httpapi.NewRouter(&db.Queries{}, "https://short.io")
 
-	router := setupRouter()
-	request := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
 	w := httptest.NewRecorder()
 
-	router.ServeHTTP(w, request)
+	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("want %d; got %d", http.StatusOK, w.Code)
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
+
 	if w.Body.String() != "pong" {
-		t.Fatalf("want %s; got %s", "pong", w.Body.String())
+		t.Fatalf("expected body %q, got %q", "pong", w.Body.String())
 	}
 }
