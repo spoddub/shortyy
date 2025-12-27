@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/joho/godotenv"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/joho/godotenv"
 	"github.com/pressly/goose/v3"
 
 	db "shorty/internal/db/sqlc"
@@ -27,10 +27,6 @@ type linkResp struct {
 	OriginalURL string `json:"original_url"`
 	ShortName   string `json:"short_name"`
 	ShortURL    string `json:"short_url"`
-}
-
-type errResp struct {
-	Error string `json:"error"`
 }
 
 var (
@@ -228,12 +224,12 @@ func TestCreateGeneratesShortNameWhenMissing(t *testing.T) {
 	}
 }
 
-func TestShortNameConflictReturns409(t *testing.T) {
+func TestShortNameConflictReturns422(t *testing.T) {
 	truncateLinks(t)
 	h := newRouter(t)
 
 	w := doJSON(t, h, http.MethodPost, "/api/links", map[string]any{
-		"original_url": "https://a.com",
+		"original_url": "https://example.com",
 		"short_name":   "dup",
 	})
 	if w.Code != http.StatusCreated {
@@ -241,16 +237,44 @@ func TestShortNameConflictReturns409(t *testing.T) {
 	}
 
 	w = doJSON(t, h, http.MethodPost, "/api/links", map[string]any{
-		"original_url": "https://b.com",
+		"original_url": "https://example.com/2",
 		"short_name":   "dup",
 	})
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d, body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d, body=%s", w.Code, w.Body.String())
 	}
 
-	er := decodeJSON[errResp](t, w)
-	if er.Error == "" {
-		t.Fatalf("expected error message, got empty")
+	var resp struct {
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Errors["short_name"]; got != "short name already in use" {
+		t.Fatalf("expected errors.short_name %q, got %q", "short name already in use", got)
+	}
+}
+
+func TestInvalidURLReturns422(t *testing.T) {
+	truncateLinks(t)
+	h := newRouter(t)
+
+	w := doJSON(t, h, http.MethodPost, "/api/links", map[string]any{
+		"original_url": "not-a-url",
+		"short_name":   "abc",
+	})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d, body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Errors map[string]string `json:"errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resp.Errors["original_url"]; !ok {
+		t.Fatalf("expected errors.original_url to be present, got %v", resp.Errors)
 	}
 }
 
@@ -275,6 +299,14 @@ func TestInvalidJSONReturns400(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode json: %v, body=%s", err, w.Body.String())
+	}
+	if resp["error"] != "invalid request" {
+		t.Fatalf("expected error %q, got %q", "invalid request", resp["error"])
 	}
 }
 
@@ -304,7 +336,6 @@ func TestLinksPaginationFirst10(t *testing.T) {
 		t.Fatalf("expected 200, got %d, body=%s", w.Code, w.Body.String())
 	}
 
-	// 10 элементов - это 0-9 (inclusive)
 	if got := w.Header().Get("Content-Range"); got != "links 0-9/12" {
 		t.Fatalf("expected Content-Range %q, got %q", "links 0-9/12", got)
 	}
