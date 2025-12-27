@@ -9,6 +9,18 @@ import (
 	"context"
 )
 
+const countLinks = `-- name: CountLinks :one
+SELECT count(*)::bigint AS total
+FROM links
+`
+
+func (q *Queries) CountLinks(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countLinks)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
 const createLink = `-- name: CreateLink :one
 INSERT INTO links (original_url, short_name)
 VALUES ($1, $2)
@@ -105,6 +117,44 @@ func (q *Queries) ListLinks(ctx context.Context) ([]ListLinksRow, error) {
 	var items []ListLinksRow
 	for rows.Next() {
 		var i ListLinksRow
+		if err := rows.Scan(&i.ID, &i.OriginalUrl, &i.ShortName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLinksRange = `-- name: ListLinksRange :many
+SELECT id, original_url, short_name
+FROM links
+ORDER BY id
+LIMIT $1 OFFSET $2
+`
+
+type ListLinksRangeParams struct {
+	Limit  int32
+	Offset int32
+}
+
+type ListLinksRangeRow struct {
+	ID          int64
+	OriginalUrl string
+	ShortName   string
+}
+
+func (q *Queries) ListLinksRange(ctx context.Context, arg ListLinksRangeParams) ([]ListLinksRangeRow, error) {
+	rows, err := q.db.Query(ctx, listLinksRange, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLinksRangeRow
+	for rows.Next() {
+		var i ListLinksRangeRow
 		if err := rows.Scan(&i.ID, &i.OriginalUrl, &i.ShortName); err != nil {
 			return nil, err
 		}
