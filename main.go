@@ -56,5 +56,5 @@ func main() {
 	q := db.New(pool)
 	router := httpapi.NewRouter(q, baseURL)
 
-	_ = router.Run(":" + port)
+	_ = router.Run(":8080")
 }
