@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -20,96 +22,145 @@ import (
 )
 
 var (
-	envOnce     sync.Once
-	migrateOnce sync.Once
-
-	projectRoot string
-	rootErr     error
+	baseDSN       string
+	schemaDSN     string
+	schemaName    string
+	migrationsDir string
 )
 
-func loadEnvAndRoot(t *testing.T) string {
-	t.Helper()
-
-	envOnce.Do(func() {
-		wd, err := os.Getwd()
-		if err != nil {
-			rootErr = err
-			return
-		}
-
-		dir := wd
-		for i := 0; i < 10; i++ {
-			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-				projectRoot = dir
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-
-		if projectRoot == "" {
-			rootErr = fmt.Errorf("project root not found (go.mod). wd=%s", wd)
-			return
-		}
-
-		_ = godotenv.Load(
-			filepath.Join(projectRoot, ".env"),
-			filepath.Join(projectRoot, ".env.local"),
-			filepath.Join(projectRoot, ".env.test"),
-		)
-	})
-
-	if rootErr != nil {
-		t.Fatal(rootErr)
+func TestMain(m *testing.M) {
+	root, err := findProjectRoot()
+	if err != nil {
+		fmt.Println("test setup failed:", err)
+		os.Exit(1)
 	}
 
-	return projectRoot
+	_ = godotenv.Load(
+		filepath.Join(root, ".env"),
+		filepath.Join(root, ".env.local"),
+		filepath.Join(root, ".env.test"),
+	)
+
+	baseDSN = os.Getenv("DATABASE_URL")
+	if strings.TrimSpace(baseDSN) == "" {
+		fmt.Println("DATABASE_URL is required for tests (env var or .env/.env.local/.env.test)")
+		os.Exit(1)
+	}
+
+	migrationsDir = filepath.Join(root, "db", "migrations")
+
+	schemaName = fmt.Sprintf("test_httpapi_%d_%d", os.Getpid(), time.Now().UnixNano())
+	if err := createSchema(baseDSN, schemaName); err != nil {
+		fmt.Println("create schema failed:", err)
+		os.Exit(1)
+	}
+
+	schemaDSN, err = dsnWithSearchPath(baseDSN, schemaName)
+	if err != nil {
+		fmt.Println("build schema DSN failed:", err)
+		_ = dropSchema(baseDSN, schemaName)
+		os.Exit(1)
+	}
+
+	if err := runMigrations(schemaDSN, migrationsDir); err != nil {
+		fmt.Println("goose up failed:", err)
+		_ = dropSchema(baseDSN, schemaName)
+		os.Exit(1)
+	}
+
+	code := m.Run()
+
+	_ = dropSchema(baseDSN, schemaName)
+
+	os.Exit(code)
 }
 
-func mustDSN(t *testing.T) string {
-	t.Helper()
-
-	root := loadEnvAndRoot(t)
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Fatalf("DATABASE_URL is required for tests. Set it as env var or put it into %s", filepath.Join(root, ".env"))
+func findProjectRoot() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
 	}
-	return dsn
+
+	dir := wd
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	return "", fmt.Errorf("project root not found (go.mod). wd=%s", wd)
+}
+
+func dsnWithSearchPath(dsn, schema string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func createSchema(dsn, schema string) error {
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+
+	_, err = sqlDB.Exec(`CREATE SCHEMA IF NOT EXISTS ` + quoteIdent(schema))
+	return err
+}
+
+func dropSchema(dsn, schema string) error {
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+
+	_, err = sqlDB.Exec(`DROP SCHEMA IF EXISTS ` + quoteIdent(schema) + ` CASCADE`)
+	return err
+}
+
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func runMigrations(dsn, dir string) error {
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+
+	if err := goose.SetDialect("postgres"); err != nil {
+		return err
+	}
+	return goose.Up(sqlDB, dir)
 }
 
 func openSQL(t *testing.T) *sql.DB {
 	t.Helper()
 
-	dsn := mustDSN(t)
-
-	sqlDB, err := sql.Open("pgx", dsn)
+	sqlDB, err := sql.Open("pgx", schemaDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	root := loadEnvAndRoot(t)
-	migrationsDir := filepath.Join(root, "db", "migrations")
-
-	migrateOnce.Do(func() {
-		_ = goose.SetDialect("postgres")
-		if err := goose.Up(sqlDB, migrationsDir); err != nil {
-			_ = sqlDB.Close()
-			t.Fatalf("goose up failed: %v", err)
-		}
-	})
-
 	return sqlDB
 }
 
 func openPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
-	dsn := mustDSN(t)
-
-	pool, err := pgxpool.New(t.Context(), dsn)
+	pool, err := pgxpool.New(t.Context(), schemaDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +170,6 @@ func openPool(t *testing.T) *pgxpool.Pool {
 
 func truncateAll(t *testing.T, sqlDB *sql.DB) {
 	t.Helper()
-
 	_, err := sqlDB.Exec(`TRUNCATE link_visits, links RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatal(err)
@@ -142,18 +192,13 @@ func seedLink(t *testing.T, sqlDB *sql.DB, originalURL, shortName string) int64 
 
 func newRouter(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
-
 	q := db.New(pool)
 	return NewRouter(q, "https://short.io")
 }
 
 func TestRedirectCreatesVisit(t *testing.T) {
 	sqlDB := openSQL(t)
-	defer func() {
-		if err := sqlDB.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	defer sqlDB.Close()
 
 	truncateAll(t, sqlDB)
 	_ = seedLink(t, sqlDB, "https://example.com/long-url", "exmpl")
@@ -214,11 +259,7 @@ func TestRedirectCreatesVisit(t *testing.T) {
 
 func TestLinkVisitsPagination(t *testing.T) {
 	sqlDB := openSQL(t)
-	defer func() {
-		if err := sqlDB.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}()
+	defer sqlDB.Close()
 
 	truncateAll(t, sqlDB)
 	linkID := seedLink(t, sqlDB, "https://example.com", "seed")
