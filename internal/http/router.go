@@ -3,7 +3,9 @@ package httpapi
 import (
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -87,7 +89,65 @@ func (h *Handler) shortURL(shortName string) string {
 }
 
 func (h *Handler) listLinks(c *gin.Context) {
-	rows, err := h.Q.ListLinks(c.Request.Context())
+	ctx := c.Request.Context()
+
+	total, err := h.Q.CountLinks(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	rawRange := c.Query("range")
+
+	if strings.TrimSpace(rawRange) == "" {
+		rows, err := h.Q.ListLinks(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+
+		out := make([]linkOut, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, linkOut{
+				ID:          r.ID,
+				OriginalURL: r.OriginalUrl,
+				ShortName:   r.ShortName,
+				ShortURL:    h.shortURL(r.ShortName),
+			})
+		}
+
+		if len(out) == 0 {
+			c.Header("Content-Range", fmt.Sprintf("links */%d", total))
+		} else {
+			c.Header("Content-Range", fmt.Sprintf("links 0-%d/%d", len(out)-1, total))
+		}
+
+		c.JSON(http.StatusOK, out)
+		return
+	}
+
+	from, to, ok := parseRange(rawRange)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid range"})
+		return
+	}
+
+	limit := to - from
+	if limit < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid range"})
+		return
+	}
+
+	if limit == 0 || int64(from) >= total {
+		c.Header("Content-Range", fmt.Sprintf("links */%d", total))
+		c.JSON(http.StatusOK, []linkOut{})
+		return
+	}
+
+	rows, err := h.Q.ListLinksRange(ctx, db.ListLinksRangeParams{
+		Limit:  int32(limit),
+		Offset: int32(from),
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -103,6 +163,14 @@ func (h *Handler) listLinks(c *gin.Context) {
 		})
 	}
 
+	if len(out) == 0 {
+		c.Header("Content-Range", fmt.Sprintf("links */%d", total))
+		c.JSON(http.StatusOK, out)
+		return
+	}
+
+	end := from + len(out) - 1
+	c.Header("Content-Range", fmt.Sprintf("links %d-%d/%d", from, end, total))
 	c.JSON(http.StatusOK, out)
 }
 
@@ -285,6 +353,20 @@ func (h *Handler) redirectByShortName(c *gin.Context) {
 	}
 
 	c.Redirect(http.StatusFound, row.OriginalUrl)
+}
+
+func parseRange(raw string) (from, to int, ok bool) {
+	raw = strings.TrimSpace(raw)
+
+	var arr []int
+	if err := json.Unmarshal([]byte(raw), &arr); err != nil || len(arr) != 2 {
+		return 0, 0, false
+	}
+
+	if arr[0] < 0 || arr[1] < 0 || arr[1] < arr[0] {
+		return 0, 0, false
+	}
+	return arr[0], arr[1], true
 }
 
 func validateOriginalURL(s string) error {
