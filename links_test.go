@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"github.com/joho/godotenv"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +41,8 @@ var (
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
 
+	_ = godotenv.Load()
+
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		panic("DATABASE_URL is required for tests")
@@ -48,6 +52,11 @@ func TestMain(m *testing.M) {
 
 	testSQL, err = sql.Open("pgx", dsn)
 	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = testSQL.Close() }()
+
+	if err := testSQL.Ping(); err != nil {
 		panic(err)
 	}
 
@@ -63,12 +72,9 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	defer testPool.Close()
 
 	code := m.Run()
-
-	testPool.Close()
-	_ = testSQL.Close()
-
 	os.Exit(code)
 }
 
@@ -269,5 +275,69 @@ func TestInvalidJSONReturns400(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body=%s", w.Code, w.Body.String())
+	}
+}
+
+func seedLinks(t *testing.T, n int) {
+	t.Helper()
+
+	for i := 0; i < n; i++ {
+		_, err := testSQL.Exec(
+			`INSERT INTO links (original_url, short_name) VALUES ($1, $2)`,
+			fmt.Sprintf("https://example.com/%d", i),
+			fmt.Sprintf("seed-%d", i),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLinksPaginationFirst10(t *testing.T) {
+	truncateLinks(t)
+	seedLinks(t, 12)
+
+	h := newRouter(t)
+
+	w := doJSON(t, h, http.MethodGet, `/api/links?range=[0,10]`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", w.Code, w.Body.String())
+	}
+
+	// 10 элементов - это 0-9 (inclusive)
+	if got := w.Header().Get("Content-Range"); got != "links 0-9/12" {
+		t.Fatalf("expected Content-Range %q, got %q", "links 0-9/12", got)
+	}
+
+	list := decodeJSON[[]linkResp](t, w)
+	if len(list) != 10 {
+		t.Fatalf("expected 10 items, got %d", len(list))
+	}
+	if list[0].ID != 1 || list[9].ID != 10 {
+		t.Fatalf("unexpected ids: first=%d last=%d", list[0].ID, list[9].ID)
+	}
+}
+
+func TestLinksPaginationOffset5Take5(t *testing.T) {
+	truncateLinks(t)
+	seedLinks(t, 12)
+
+	h := newRouter(t)
+
+	w := doJSON(t, h, http.MethodGet, `/api/links?range=[5,10]`, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", w.Code, w.Body.String())
+	}
+
+	if got := w.Header().Get("Content-Range"); got != "links 5-9/12" {
+		t.Fatalf("expected Content-Range %q, got %q", "links 5-9/12", got)
+	}
+
+	list := decodeJSON[[]linkResp](t, w)
+	if len(list) != 5 {
+		t.Fatalf("expected 5 items, got %d", len(list))
+	}
+	if list[0].ID != 6 || list[4].ID != 10 {
+		t.Fatalf("unexpected ids: first=%d last=%d", list[0].ID, list[4].ID)
 	}
 }
