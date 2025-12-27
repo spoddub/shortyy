@@ -28,3 +28,13 @@ WHERE id = $1
 -- name: DeleteLink :execrows
 DELETE FROM links
 WHERE id = $1;
+
+-- name: CountLinks :one
+SELECT count(*)::bigint AS total
+FROM links;
+
+-- name: ListLinksRange :many
+SELECT id, original_url, short_name
+FROM links
+ORDER BY id
+LIMIT $1 OFFSET $2;
