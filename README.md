@@ -34,7 +34,7 @@ It turns long URLs into short codes and redirects users to the original address.
 | [PostgreSQL](https://www.postgresql.org/) | Persistent storage. |
 | [sqlc](https://sqlc.dev/) | Type-safe SQL code generation. |
 | [goose](https://github.com/pressly/goose) | Database migrations. |
-| [go-playground/validator v10](https://github.com/go-playground/validator) | Request validation (Gin binding). |
+| [playground](https://github.com/go-playground/validator) | Request validation (Gin binding). |
 | [golangci-lint](https://golangci-lint.run/) | All-in-one Go linter. |
 | [GitHub Actions](https://docs.github.com/actions) | CI for linting, tests and builds. |
 | [Sentry](https://sentry.io/) | Error monitoring (optional). |
